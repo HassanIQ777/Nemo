@@ -12,7 +12,7 @@
 # instead of pretending `rm` is `shred` in a trenchcoat.
 #
 # Modes:
-#   ./nemo.sh <dir1> [dir2 ...]              seal:   per-dir encrypt, verify, shred original
+#   ./nemo.sh <dir1> [dir2 ...]               seal:   per-dir encrypt, verify, shred original
 #   ./nemo.sh --decrypt <archive> [outdir]    unseal: decrypt + extract, then delete the archive
 #   ./nemo.sh --list <archive>                peek:   list contents, extract nothing, archive kept
 #
