@@ -27,6 +27,17 @@ Usage:
 ### Prerequisites
 
 * Need to install each of: `age`, `tar`.
+---
+
+Clone the repository
+```sh
+git clone https://github.com/HassanIQ777/Nemo.git
+cd Nemo
+
+chmod +x nemo.sh
+# Then simply run the program
+# Or move it to the bin directory to run it from anywhere
+```
 
 ---
 
