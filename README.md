@@ -35,6 +35,16 @@ Usage:
 * After encrypting, the program deletes the original directories.
 * After decrypting, the program deletes the encrypted files.
 
+## Updating
+You can very quickly and easily update the program like this:
+```sh
+$ bash update.sh 
+ ----- Started Updater -----
+Updating the program...
+HEAD is now at 52f50be changes to README.md
+Successfully finished updating!
+```
+
 ## License
 
 This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
