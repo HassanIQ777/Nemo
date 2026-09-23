@@ -34,3 +34,11 @@ Usage:
 ### ⚠️ For maximum security, it's been decided that:
 * After encrypting, the program deletes the original directories.
 * After decrypting, the program deletes the encrypted files.
+
+## License
+
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+## Author
+
+Made by [**HassanIQ777**](https://github.com/HassanIQ777/)
