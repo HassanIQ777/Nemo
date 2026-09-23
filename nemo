@@ -30,9 +30,9 @@ command -v tar >/dev/null 2>&1 || { echo "✗ 'tar' not found. That's... concern
 usage() {
     cat >&2 <<'USAGE'
 Usage:
-  ./nemo.sh <dir1> [dir2 ...]             Encrypt + verify + shred, one archive per directory
-  ./nemo.sh --decrypt <archive> [outdir]  Decrypt, extract, then delete the archive
-  ./nemo.sh --list <archive>              List archive contents, extract nothing, archive kept
+  nemo <dir1> [dir2 ...]             Encrypt + verify + shred, one archive per directory
+  nemo --decrypt <archive> [outdir]  Decrypt, extract, then delete the archive
+  nemo --list <archive>              List archive contents, extract nothing, archive kept
 USAGE
     exit 1
 }
