@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+#
+# nemo.sh
+#
+# "Nemo", Latin for "nobody".
+#
+# Encrypts each directory you give it into ORIGINAL_NAME.tar.age, sitting
+# right next to where the original was, verifies the ritual actually worked,
+# then makes the original disappear as thoroughly as the platform honestly
+# allows. No root? No shred. No shred? No lies about "secure" deletion,
+# this script tells you exactly what tier of paranoia you're getting,
+# instead of pretending `rm` is `shred` in a trenchcoat.
+#
+# Modes:
+#   ./nemo.sh <dir1> [dir2 ...]              seal:   per-dir encrypt, verify, shred original
+#   ./nemo.sh --decrypt <archive> [outdir]    unseal: decrypt + extract, then delete the archive
+#   ./nemo.sh --list <archive>                peek:   list contents, extract nothing, archive kept
+#
+# Heads up: --decrypt deletes the .tar.age once it's safely extracted. It's
+# the mirror of sealing, the archive was your only copy of the protected
+# data, and once it's unsealed back to plaintext, keeping the ciphertext
+# around too just doubles your exposure for no benefit. If you want a
+# reusable backup, copy the archive elsewhere BEFORE decrypting it.
+#
+set -euo pipefail
+
+command -v age >/dev/null 2>&1 || { echo "✗ 'age' not found. Install it first (pkg/pacman install age)." >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { echo "✗ 'tar' not found. That's... concerning. Aborting." >&2; exit 1; }
+
+usage() {
+    cat >&2 <<'USAGE'
+Usage:
+  ./nemo.sh <dir1> [dir2 ...]             Encrypt + verify + shred, one archive per directory
+  ./nemo.sh --decrypt <archive> [outdir]  Decrypt, extract, then delete the archive
+  ./nemo.sh --list <archive>              List archive contents, extract nothing, archive kept
+USAGE
+    exit 1
+}
+
+[[ $# -eq 0 ]] && usage
+
+# ---------------------------------------------------------------------------
+# Mode dispatch, decrypt/list are quick side quests that bail out before
+# ever reaching the seal-and-shred main quest below.
+# ---------------------------------------------------------------------------
+case "$1" in
+    -d|--decrypt)
+        [[ $# -ge 2 ]] || { echo "✗ Need an archive to decrypt." >&2; usage; }
+        ARCHIVE="$2"
+        [[ -f "$ARCHIVE" ]] || { echo "✗ '$ARCHIVE' not found." >&2; exit 1; }
+        # Default: put it back exactly where the archive lives, mirroring
+        # how it got sealed in the first place. Override with a 3rd arg.
+        OUTDIR="${3:-$(dirname "$ARCHIVE")}"
+        mkdir -p "$OUTDIR"
+        echo "== Decrypting $ARCHIVE -> $OUTDIR =="
+        age -d "$ARCHIVE" | tar -xf - -C "$OUTDIR"
+        echo "✓ Extracted into $OUTDIR"
+        # The pipe above ran under set -euo pipefail, if decryption or
+        # extraction had failed, we'd already be dead and never reach this
+        # line. Only a confirmed-good extraction earns the archive's deletion.
+        # No shred/trim ceremony needed here: it's ciphertext, not plaintext,
+        # so a plain rm is all ciphertext has ever needed.
+        rm -f -- "$ARCHIVE"
+        echo "✓ Removed $ARCHIVE, unsealed is unsealed, no going back to it."
+        exit 0
+        ;;
+    -l|--list)
+        [[ $# -ge 2 ]] || { echo "✗ Need an archive to list." >&2; usage; }
+        ARCHIVE="$2"
+        [[ -f "$ARCHIVE" ]] || { echo "✗ '$ARCHIVE' not found." >&2; exit 1; }
+        age -d "$ARCHIVE" | tar -tf -
+        exit 0
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 0. Preflight (seal mode), bring your own crypto, we don't roll our own
+# ---------------------------------------------------------------------------
+SOURCES=("$@")
+for src in "${SOURCES[@]}"; do
+    [[ -d "$src" ]] || { echo "✗ '$src' is not a directory. Aborting before I do something dumb." >&2; exit 1; }
+done
+
+# ---------------------------------------------------------------------------
+# 1. Figure out what kind of reality we're running in (once, not per-dir)
+# ---------------------------------------------------------------------------
+IS_TERMUX=false
+if [[ -n "${PREFIX:-}" && "$PREFIX" == *com.termux* ]]; then
+    IS_TERMUX=true
+fi
+
+IS_ROOT=false
+if [[ "$(id -u)" -eq 0 ]]; then
+    IS_ROOT=true
+fi
+
+echo "== Environment check =="
+echo "  Termux:    $IS_TERMUX"
+echo "  Root:      $IS_ROOT"
+echo
+echo "Note: each directory gets its own passphrase prompt below, that's"
+echo "intentional, so every archive stands on its own and isn't glued to"
+echo "whatever session sealed it. Same passphrase each time is perfectly fine."
+echo
+
+is_rotational() {
+    # Resolve a path to its underlying block device and ask the kernel
+    # directly whether it's rotational. Prefer lsblk, it correctly walks
+    # LVM/LUKS/device-mapper stacking (e.g. /dev/mapper/cryptroot -> dm-0),
+    # which a hand-rolled "strip trailing digits" regex gets wrong for
+    # anything named dm-N. Falls back to raw sysfs only if lsblk is missing.
+    # Echoes "1" (HDD), "0" (SSD), or nothing if genuinely unknown, unknown
+    # is treated as flash later on, the safer assumption either way.
+    local path="$1" dev base
+    dev="$(df --output=source "$path" 2>/dev/null | tail -1)" || return 0
+    [[ -b "$dev" ]] || return 0
+
+    if command -v lsblk >/dev/null 2>&1; then
+        lsblk -ndo rota "$dev" 2>/dev/null | tr -d '[:space:]'
+        return 0
+    fi
+
+    base="$(basename "$dev" | sed -E 's/p?[0-9]+$//')"
+    cat "/sys/block/$base/queue/rotational" 2>/dev/null || true
+}
+
+delete_source() {
+    # Deletes one already-verified source directory, with exactly as much
+    # ceremony as the platform actually supports. Any mountpoint that needs
+    # a trim is echoed on stdout (one per line) so the caller can queue it
+    # and sweep once at the end, instead of trimming the same filesystem
+    # five times over.
+    local src="$1"
+    if $IS_TERMUX || ! $IS_ROOT; then
+        # Plain-delete path. Two cases land here on purpose:
+        #   - No root at all: no dm-crypt, no ioctl-level TRIM, no
+        #     multi-pass overwrite that means anything on flash storage.
+        #   - Termux, even if rooted: Android's sandboxing makes
+        #     sysfs/dm-crypt access unreliable enough across devices and
+        #     versions that pretending "root" makes it work would be
+        #     overpromising. Consistent beats half-working.
+        # Either way we do what's honestly available, unlink the files,
+        # and let the OS-level disk encryption (on by default on basically
+        # every phone/laptop made this decade) handle the rest once those
+        # blocks get reclaimed. Not a cop-out, just what flash storage
+        # gives you without a real kernel handshake.
+        rm -rf -- "$src"
+        echo "  ✓ removed (plain delete, no root, so no secure-erase primitives)" >&2
+    else
+        local rota mnt
+        rota="$(is_rotational "$src")"
+        if [[ "$rota" == "1" ]] && command -v shred >/dev/null 2>&1; then
+            echo "  spinning rust detected, shredding properly" >&2
+            find "$src" -type f -exec shred -uvz -n 3 {} \; >&2
+            find "$src" -mindepth 1 -type d -empty -delete
+            rmdir "$src" 2>/dev/null || true
+        else
+            echo "  flash storage (or shred unavailable), deleting + queuing trim" >&2
+            mnt="$(df --output=target "$src" 2>/dev/null | tail -1)"
+            rm -rf -- "$src"
+            [[ -n "$mnt" ]] && echo "$mnt"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 2-4. Per directory: seal it into ORIGINAL_NAME.tar.age next to where it
+# lived, verify that archive byte-for-byte, then delete the original. One
+# directory finishing badly doesn't block the rest, you get a clear summary
+# of what succeeded and what didn't at the end instead of an all-or-nothing
+# abort.
+# ---------------------------------------------------------------------------
+FAILED=()
+TRIM_TARGETS=()
+
+for src in "${SOURCES[@]}"; do
+    src="${src%/}"                         # tidy up a trailing slash, if any
+    parent="$(dirname "$src")"
+    name="$(basename "$src")"
+    archive="$parent/$name.tar.age"
+
+    echo "== Sealing '$src' -> $archive =="
+
+    if [[ -e "$archive" ]]; then
+        echo "✗ '$archive' already exists, refusing to overwrite it. Move it aside first." >&2
+        FAILED+=("$src (archive already exists)")
+        echo
+        continue
+    fi
+
+    tar -cf - -C "$parent" "$name" | age -p -o "$archive"
+
+    vdir="$(mktemp -d)"
+    if age -d "$archive" | tar -xf - -C "$vdir" 2>/dev/null && diff -rq "$src" "$vdir/$name" >/dev/null 2>&1; then
+        rm -rf "$vdir"
+        echo "✓ Verified, archive is a perfect encrypted twin of the original."
+        echo "== Deleting original =="
+        while IFS= read -r mnt; do
+            TRIM_TARGETS+=("$mnt")
+        done < <(delete_source "$src")
+        echo "✓ Done with '$src'."
+    else
+        rm -rf "$vdir"
+        echo "✗ Verification failed for '$src', original left untouched. Archive kept for inspection: $archive" >&2
+        FAILED+=("$src (verification failed)")
+    fi
+    echo
+done
+
+# One trim sweep at the end, de-duped, instead of hammering the same
+# filesystem once per directory that happened to live on it.
+if $IS_ROOT && ! $IS_TERMUX && command -v fstrim >/dev/null 2>&1 && [[ ${#TRIM_TARGETS[@]} -gt 0 ]]; then
+    mapfile -t UNIQUE_MOUNTS < <(printf '%s\n' "${TRIM_TARGETS[@]}" | sort -u)
+    for mnt in "${UNIQUE_MOUNTS[@]}"; do
+        fstrim -v "$mnt" 2>/dev/null || echo "  (fstrim skipped for $mnt, not supported here)"
+    done
+fi
+
+echo "Guard each passphrase like it's the only copy, because now, it basically is."
+
+if [[ ${#FAILED[@]} -gt 0 ]]; then
+    echo >&2
+    echo "✗ Some directories were NOT sealed successfully:" >&2
+    printf '  - %s\n' "${FAILED[@]}" >&2
+    exit 1
+fi
